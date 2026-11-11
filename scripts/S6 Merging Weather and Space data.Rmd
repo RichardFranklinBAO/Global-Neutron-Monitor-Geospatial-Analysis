@@ -1,0 +1,130 @@
+---
+title: "S6 Merging Weather and Space data"
+output: html_document
+---
+
+```{r}
+# ---- Packages ----
+library(readr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(here)
+
+# å¦æä½ æ¯æ¾å¨ scripts éï¼å»ºè®®æ¹æä½ çå®çæä»¶åï¼
+here::i_am("scripts/S6 Merging Weather and Space data.Rmd")
+
+# ---- Paths ----
+weather_path <- here("dataset", "outcomes", "from_s4", "era5_points_merged_weighted_12h_2000_2026.csv")
+space_path   <- here("dataset", "outcomes", "from_s5", "nmdb_merged_2000_2026_with_alt.csv")
+
+out_dir <- here("dataset", "outcomes", "from_s6")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ---- Read weather (long) ----
+weather <- read_csv(weather_path, show_col_types = FALSE) %>%
+  mutate(
+    station = as.character(station),
+    # ä½ ç weather é date çèµ·æ¥å "2000/1/1"ï¼è¿éç»ä¸è§£æ
+    date = as.Date(date, tryFormats = c("%Y/%m/%d", "%Y-%m-%d"))
+  )
+
+# ---- Read space (wide, with alt row at row 2) ----
+# å³é®ç¹ï¼ä¸è¦è®© datetime è¢«è¯»æ POSIXctï¼å¦å alt_m è¿ä¸è¡ä¼åç±»åå²çª
+space_raw <- read_csv(space_path, show_col_types = FALSE, col_types = cols(.default = col_character()))
+
+# space çåï¼datetime + station columns
+stopifnot("datetime" %in% names(space_raw))
+space_station_cols <- setdiff(names(space_raw), "datetime")
+
+# ---- Extract alt_m row (row 2) ----
+# ä½ ç°å¨çæä»¶ç»æï¼row1 æ¯è¡¨å¤´ï¼row2 æ¯ alt_m è¡ï¼datetime ååå®¹ä¸º "alt_m"ï¼
+# ä¹å¯è½æäººå¯¼åºæ¶ alt è¡ç datetime åå°±æ¯ "alt_m"
+alt_row_idx <- which(space_raw$datetime == "alt_m")
+if (length(alt_row_idx) == 0) {
+  # fallbackï¼å¼ºå¶ç¨ç¬¬äºè¡
+  alt_row_idx <- 1
+  warning("Did not find datetime == 'alt_m'. Fallback to row 2 (index 2). Please double-check.")
+  alt_row_idx <- 2
+} else {
+  alt_row_idx <- alt_row_idx[1]
+}
+
+alt_map <- space_raw[alt_row_idx, ] %>%
+  select(all_of(space_station_cols)) %>%
+  pivot_longer(cols = everything(), names_to = "station", values_to = "alt_m") %>%
+  mutate(
+    station = as.character(station),
+    alt_m = suppressWarnings(as.numeric(alt_m))
+  )
+
+# ---- Remove alt_m row from the actual time series ----
+space_ts <- space_raw %>%
+  slice(-alt_row_idx)
+
+# ---- Convert space wide -> long + derive date/period ----
+# space datetime looks like "2000-01-01T00:00:00Z"
+space_long <- space_ts %>%
+  mutate(
+    datetime_str = datetime,
+    datetime = ymd_hms(datetime_str, tz = "UTC", quiet = TRUE),
+    date = as.Date(datetime),
+    hour_utc = hour(datetime),
+    period = case_when(
+      hour_utc == 0  ~ "h00_12",
+      hour_utc == 12 ~ "h13_23",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(-datetime_str, -hour_utc) %>%
+  pivot_longer(
+    cols = all_of(space_station_cols),
+    names_to = "station",
+    values_to = "space_value"
+  ) %>%
+  mutate(
+    station = as.character(station),
+    # ä¿ç NAï¼ç©ºå­ç¬¦ä¸²ã"NA" é½è½¬æçæ­£ NA
+    space_value = na_if(space_value, ""),
+    space_value = na_if(space_value, "NA"),
+    space_value = suppressWarnings(as.numeric(space_value))
+  ) %>%
+  filter(!is.na(period))
+
+# ---- Merge for each station and write out ----
+stations_weather <- sort(unique(weather$station))
+stations_space   <- sort(unique(space_long$station))
+stations_all     <- sort(unique(c(stations_weather, stations_space)))
+
+cat("Stations in weather:", length(stations_weather), "\n")
+cat("Stations in space  :", length(stations_space), "\n")
+cat("Stations total     :", length(stations_all), "\n\n")
+
+for (st in stations_all) {
+  w_st <- weather %>% filter(station == st)
+  s_st <- space_long %>% filter(station == st)
+
+  merged_st <- w_st %>%
+    full_join(s_st, by = c("station", "date", "period")) %>%
+    left_join(alt_map, by = "station") %>%
+    arrange(date, period)
+
+  out_path <- file.path(out_dir, paste0("station_", st, "_weather_space_merged.csv"))
+  write_csv(merged_st, out_path, na = "NA")
+
+  cat("Saved:", out_path, " | rows:", nrow(merged_st), "\n")
+}
+
+# ---- Quick diagnostics ----
+missing_alt_st <- alt_map %>% filter(is.na(alt_m)) %>% pull(station)
+if (length(missing_alt_st) > 0) {
+  cat("\nWarning: missing alt_m for", length(missing_alt_st), "stations:\n")
+  print(missing_alt_st)
+} else {
+  cat("\nAll stations have alt_m.\n")
+}
+
+cat("\nDone. Output folder:\n", out_dir, "\n")
+
+```
+
