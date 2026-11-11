@@ -1,0 +1,154 @@
+---
+title: "S8 World Map of NM Station Correlations"
+author: ""
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Overview
+
+This script produces a world map of NMDB neutron monitor stations, where:
+
+- **Color** represents the RÂ² value between CARI-7A modelled neutron flux and the observed NM count rate (from S7).
+- **Point size** is proportional to the number of valid paired measurements (n).
+
+Stations with higher RÂ² (warmer colors) show stronger agreement between the CARI-7A model and ground observations. Stations with fewer measurements appear as smaller points.
+
+---
+
+## Step 1: Load packages
+
+```{r packages}
+library(tidyverse)
+library(ggplot2)
+library(maps)
+library(ggrepel)
+```
+
+---
+
+## Step 2: Load data
+
+```{r load_data}
+# RÂ² results from S7
+r2 <- read_csv("../dataset/outcomes/from_s7/r2_results.csv")
+
+# Station coordinates from S8 input
+coords <- read_csv("../dataset/inputs/s8/nmdb_stations_final.csv")
+
+# Join by station name
+df <- r2 %>%
+  inner_join(coords, by = "station")
+
+cat("Stations matched:", nrow(df), "\n")
+head(df)
+```
+
+---
+
+## Step 3: Draw world map
+
+```{r world_map, fig.width=14, fig.height=7}
+world <- map_data("world")
+
+p <- ggplot() +
+  # World base map
+  geom_polygon(
+    data  = world,
+    aes(x = long, y = lat, group = group),
+    fill  = "grey92",
+    color = "grey70",
+    linewidth = 0.2
+  ) +
+  # Station points
+  geom_point(
+    data  = df,
+    aes(x = lon, y = lat, color = R2, size = n),
+    alpha = 0.85
+  ) +
+  # Station labels for high-RÂ² stations
+  geom_text_repel(
+    data        = df %>% filter(R2 >= 0.5),
+    aes(x = lon, y = lat, label = station),
+    size        = 2.5,
+    color       = "black",
+    max.overlaps = 20,
+    segment.size = 0.3
+  ) +
+  # Color scale: low RÂ² = cool blue, high RÂ² = warm red
+  scale_color_gradient2(
+    low      = "steelblue",
+    mid      = "yellow",
+    high     = "red",
+    midpoint = 0.5,
+    limits   = c(0, 1),
+    name     = "RÂ²"
+  ) +
+  # Size scale proportional to n
+  scale_size_continuous(
+    range = c(2, 10),
+    name  = "n (measurements)"
+  ) +
+  coord_fixed(1.3, xlim = c(-180, 180), ylim = c(-90, 90)) +
+  labs(
+    title    = "NMDB Station Correlations: CARI-7A Modelled vs Observed Neutron Flux",
+    subtitle = "Color = RÂ²  |  Point size = number of valid paired measurements",
+    x        = "Longitude",
+    y        = "Latitude",
+    caption  = "Stations with RÂ² â¥ 0.5 are labelled. Period: 2000â2026."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    legend.position = "right",
+    panel.grid    = element_line(color = "grey85", linewidth = 0.2)
+  )
+
+print(p)
+
+# Save output
+output_dir <- "../dataset/outcomes/from_s8"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+ggsave(
+  filename = file.path(output_dir, "world_map_r2.png"),
+  plot     = p,
+  width    = 14,
+  height   = 7,
+  dpi      = 150
+)
+cat("Map saved to", file.path(output_dir, "world_map_r2.png"), "\n")
+```
+
+---
+
+## Step 4: Export merged table
+
+```{r export_table}
+output_dir <- "../dataset/outcomes/from_s8"
+
+df_out <- df %>%
+  select(station, lat, lon, alt_m, n, R2, r, p_value, slope, intercept) %>%
+  arrange(desc(R2))
+
+write_csv(df_out, file.path(output_dir, "r2_with_coords.csv"))
+cat("Table saved to", file.path(output_dir, "r2_with_coords.csv"), "\n")
+
+df_out
+```
+
+---
+
+## Step 5: Summary statistics
+
+```{r summary}
+cat("Total stations mapped:", nrow(df), "\n")
+cat("Stations with RÂ² >= 0.5:", sum(df$R2 >= 0.5), "\n")
+cat("Stations with RÂ² >= 0.7:", sum(df$R2 >= 0.7), "\n")
+cat("Median RÂ²:", round(median(df$R2), 3), "\n")
+cat("Mean RÂ²:", round(mean(df$R2), 3), "\n")
+```
