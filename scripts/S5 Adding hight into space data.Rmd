@@ -1,0 +1,95 @@
+---
+title: "S5 Adding hight into space data"
+output: html_document
+---
+
+
+
+```{r}
+# ---- Packages ----
+library(readr)
+library(dplyr)
+library(here)
+library(stringr)
+
+# Tell here() where the project root is
+here::i_am("scripts/S5 Adding hight into space data.Rmd")
+
+# ---- Paths (relative to project root) ----
+stations_path <- here("dataset", "row", "nmdb_stations_final.csv")
+merged_path   <- here("dataset", "outcomes", "from_s2", "nmdb_merged_2000_2026.csv")
+
+out_dir  <- here("dataset", "outcomes", "from_s5")
+out_path <- file.path(out_dir, "nmdb_merged_2000_2026_with_alt.csv")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ---- Read stations (altitude table) ----
+stations <- read_csv(stations_path, show_col_types = FALSE) %>%
+  transmute(
+    station = str_trim(as.character(station)),
+    alt_m   = suppressWarnings(as.numeric(alt_m))
+  ) %>%
+  filter(!is.na(station), station != "") %>%
+  distinct(station, .keep_all = TRUE)
+
+alt_map <- setNames(stations$alt_m, stations$station)
+
+# ---- Read merged (keep datetime as character to avoid format drift) ----
+merged <- read_csv(
+  merged_path,
+  show_col_types = FALSE,
+  col_types = cols(datetime = col_character())
+)
+
+# Basic sanity checks
+stopifnot("datetime" %in% names(merged))
+
+station_cols <- setdiff(names(merged), "datetime")
+if (length(station_cols) == 0) stop("No station columns found in merged file.")
+
+# ---- Build alt_m row (this row must be placed ABOVE the first datetime row) ----
+# Create an empty one-row template with same columns/types as merged
+alt_row <- merged[1, , drop = FALSE]
+
+# Set everything to NA first (preserve column types as much as possible)
+alt_row[1, ] <- NA
+
+# Put label in datetime column
+alt_row$datetime <- "alt_m"
+
+# Fill each station column with its altitude
+for (st in station_cols) {
+  v <- unname(alt_map[st])  # numeric or NA
+
+  # If merged column is character, store altitude as character; otherwise store numeric
+  if (is.character(merged[[st]])) {
+    alt_row[[st]] <- ifelse(is.na(v), NA_character_, as.character(v))
+  } else {
+    alt_row[[st]] <- as.numeric(v)
+  }
+}
+
+# ---- Insert alt_row ABOVE the first datetime row ----
+# Result order: alt_m row first, then all original rows
+merged_with_alt <- bind_rows(alt_row, merged)
+
+# ---- Write output ----
+write_csv(merged_with_alt, out_path, na = "")
+
+# ---- Diagnostics ----
+cat("Saved to:", out_path, "\n")
+
+missing_alt <- station_cols[is.na(unname(alt_map[station_cols]))]
+if (length(missing_alt) > 0) {
+  cat("Warning: missing alt_m for", length(missing_alt), "stations.\n")
+  print(missing_alt)
+} else {
+  cat("All station columns matched to alt_m.\n")
+}
+
+# Optional: quick preview of the first 3 rows and first 10 columns
+print(merged_with_alt[1:3, 1:min(10, ncol(merged_with_alt))])
+
+
+```
+
