@@ -1,0 +1,110 @@
+---
+title: "Creating my Map"
+author: "Conglin BAO"
+date: "2026-01-20"
+output: html_document
+---
+
+```{r}
+# =========================
+# 0. Libraries
+# =========================
+library(readr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(maps)
+here::i_am('scripts/S1 Creating My Map.Rmd')
+row_datasets <- here::here('dataset', 'row', 'nmdb_stations_final.csv')
+
+# =========================
+# 1. Read station table
+# =========================
+stations <- read_csv(
+  row_datasets,
+  show_col_types = FALSE,
+  trim_ws = TRUE
+)
+
+# =========================
+# 2. Clean & standardize
+# =========================
+stations <- stations %>%
+  mutate(
+    station = str_trim(station),
+    notes = ifelse(is.na(notes), "", notes),
+    lat = as.numeric(lat),
+    lon = as.numeric(lon),
+    alt_m = as.numeric(alt_m),
+    cutoff_GV = as.numeric(cutoff_GV)
+  )
+
+# =========================
+# 3. Sanity checks (exact lat / lon)
+# =========================
+stopifnot(all(!is.na(stations$lat)))
+stopifnot(all(!is.na(stations$lon)))
+stopifnot(all(stations$lat >= -90 & stations$lat <= 90))
+stopifnot(all(stations$lon >= -180 & stations$lon <= 180))
+
+# =========================
+# 4. Check duplicate station codes
+# =========================
+dup_stations <- stations %>%
+  count(station) %>%
+  filter(n > 1)
+
+print(dup_stations)
+# æ³¨ï¼å¦ææéå¤ï¼éå¸¸æ¯ä¸åæ¢å¤´ï¼å¦ JUNG / JUNG1ï¼ï¼è¿æ¯åè®¸ç
+
+# =========================
+# 5. (Optional) Merge with a station list
+# =========================
+# å¦æä½ æä¸ä¸ªâåªæ station codeâçæä»¶ï¼æ¯å¦ station_list.csv
+# å¯ä»¥åæ¶ä¸é¢æ³¨éæ¥ç¨
+
+# station_list <- read_csv("station_list.csv", show_col_types = FALSE) %>%
+#   mutate(station = str_trim(station))
+#
+# merged_stations <- station_list %>%
+#   left_join(stations, by = "station")
+#
+# # æ£æ¥ææ²¡æ merge ä¸ä¸ç station
+# merged_stations %>%
+#   filter(is.na(lat) | is.na(lon))
+
+# =========================
+# 6. Create world map
+# =========================
+world <- map_data("world")
+
+ggplot() +
+  geom_polygon(
+    data = world,
+    aes(x = long, y = lat, group = group),
+    fill = "grey95",
+    color = "grey70",
+    linewidth = 0.2
+  ) +
+  geom_point(
+    data = stations,
+    aes(x = lon, y = lat),
+    color = "red",
+    size = 2
+  ) +
+  coord_quickmap() +
+  theme_minimal() +
+  labs(
+    title = "NMDB Stations with Exact Latitude and Longitude",
+    x = "Longitude",
+    y = "Latitude"
+  )
+
+# =========================
+# 7. Save cleaned table (optional)
+# =========================
+write_csv(stations, here::here('dataset', 'outcomes', 'nmdb_stations_with_latlon_checked.csv'))
+
+
+```
+
