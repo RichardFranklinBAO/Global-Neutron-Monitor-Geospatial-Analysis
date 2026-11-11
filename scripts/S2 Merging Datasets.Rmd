@@ -1,0 +1,316 @@
+---
+title: "S2 Merging Datasets"
+author: "Conglin BAO"
+date: "2026-01-20"
+output: html_document
+---
+
+```{r}
+packages <- c("here", "readr", "dplyr", "purrr", "stringr")
+to_install <- setdiff(packages, rownames(installed.packages()))
+if (length(to_install) > 0) install.packages(to_install)
+
+library(here)
+library(readr)
+library(dplyr)
+library(purrr)
+library(stringr)
+
+here::i_am("scripts/S2 Merging Datasets.Rmd")
+in_dir  <- here("dataset", "row")
+out_dir <- here("dataset", "outcomes", "from_s2")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+files <- list.files(
+  path = in_dir,
+  pattern = "_12h_1hTable_corr_for_efficiency_ascii\\.csv$",
+  full.names = TRUE
+) |> sort()
+
+
+length(files)
+head(files, 2)
+tail(files, 2)
+
+read_nmdb_year <- function(f) {
+  df <- readr::read_csv(
+    f,
+    comment = "#",
+    show_col_types = FALSE,
+    progress = FALSE
+  )
+
+  # ç»ä¸ datetime åå
+  if (!("datetime" %in% names(df))) {
+    # ååºï¼æ¾å¯è½çæ¶é´å
+    time_candidates <- names(df)[stringr::str_detect(tolower(names(df)), "date|time")]
+    if (length(time_candidates) == 0) stop("No time column in: ", basename(f))
+    df <- df %>% rename(datetime = all_of(time_candidates[1]))
+  }
+
+  df %>%
+    mutate(
+      datetime = as.POSIXct(datetime, tz = "UTC")
+    ) %>%
+    arrange(datetime)
+}
+
+dfs <- purrr::map(files, read_nmdb_year)
+
+# çºµååå¹¶ï¼èªå¨å¯¹é½åï¼ç¼ºçåè¡¥ NAï¼
+merged <- dplyr::bind_rows(dfs) %>%
+  arrange(datetime) %>%
+  distinct(datetime, .keep_all = TRUE)   # å»æè·¨å¹´ä»½è¾¹çå¯è½éå¤çæ¶é´ç¹
+
+# å¯éï¼æ£æ¥ç¼ºå¤±æ¯ä¾ï¼çåªäº station å¾å¤ NAï¼
+na_rate <- merged %>%
+  summarise(across(-datetime, ~ mean(is.na(.)))) %>%
+  tidyr::pivot_longer(everything(), names_to = "station", values_to = "na_rate") %>%
+  arrange(desc(na_rate))
+
+print(head(na_rate, 10))
+
+out_path <- here("dataset", "outcomes", "from_s2", "nmdb_merged_2000_2026.csv")
+readr::write_csv(merged, out_path)
+
+out_path
+dim(merged)
+
+```
+
+### Table with starttime and endtime.
+
+```{r}
+# --------------------------
+# S2 (add this chunk AFTER you have created nmdb_merged_2000_2026.csv)
+# Task: station coverage table with readable start/end datetime
+# Output:
+#   outcomes/nmdb_station_coverage_start_end.csv
+#   outcomes/nmdb_station_coverage_start_end_by_day.csv (optional)
+# --------------------------
+
+packages2 <- c("tidyr", "lubridate", "tibble", "dplyr", "readr")
+to_install2 <- setdiff(packages2, rownames(installed.packages()))
+if (length(to_install2) > 0) install.packages(to_install2)
+
+library(tidyr)
+library(lubridate)
+library(tibble)
+library(dplyr)
+library(readr)
+
+merged_path <- here("dataset", "outcomes",  "from_s2", "nmdb_merged_2000_2026.csv")
+dat <- readr::read_csv(merged_path, show_col_types = FALSE, progress = FALSE)
+
+# --- FIX 1: robust datetime parsing for strings like 2000-01-01T00:00:00Z ---
+dat <- dat %>%
+  mutate(
+    datetime_raw = as.character(datetime),
+    datetime_raw = stringr::str_replace_all(datetime_raw, "T", " "),
+    datetime_raw = stringr::str_replace_all(datetime_raw, "Z$", ""),
+    datetime = suppressWarnings(lubridate::ymd_hms(datetime_raw, tz = "UTC"))
+  )
+
+# fallback for still-failed parses
+if (any(is.na(dat$datetime))) {
+  dat <- dat %>%
+    mutate(
+      datetime = ifelse(
+        is.na(datetime),
+        as.character(datetime_raw),
+        as.character(datetime)  # temporarily character for parse_date_time
+      )
+    ) %>%
+    mutate(
+      datetime = lubridate::parse_date_time(
+        datetime,
+        orders = c("Y-m-d H:M:S", "Y-m-d H:M", "Y-m-d"),
+        tz = "UTC"
+      )
+    )
+}
+
+# if still NA, stop early with a helpful message
+n_bad <- sum(is.na(dat$datetime))
+if (n_bad > 0) {
+  bad_examples <- unique(dat$datetime_raw[is.na(dat$datetime)])[1:min(5, n_bad)]
+  stop(
+    "datetime parse still failing for ", n_bad, " rows. Examples: ",
+    paste(bad_examples, collapse = " | ")
+  )
+}
+
+dat <- dat %>% select(-datetime_raw)
+
+# --- FIX 2: infer timestep safely ---
+dt_step <- dat %>%
+  arrange(datetime) %>%
+  summarise(step = as.numeric(stats::median(diff(datetime), na.rm = TRUE), units = "secs")) %>%
+  pull(step)
+if (is.na(dt_step) || dt_step <= 0) dt_step <- 12 * 3600
+
+n_total <- nrow(dat)
+
+coverage_tbl <- dat %>%
+  tidyr::pivot_longer(
+    cols = -datetime,
+    names_to = "station",
+    values_to = "value"
+  ) %>%
+  group_by(station) %>%
+  summarise(
+    start_dt = if (all(is.na(value))) as.POSIXct(NA) else min(datetime[!is.na(value)]),
+    end_dt   = if (all(is.na(value))) as.POSIXct(NA) else max(datetime[!is.na(value)]),
+    n_obs    = sum(!is.na(value)),
+    n_total  = n_total,
+    coverage_pct = ifelse(n_total > 0, 100 * n_obs / n_total, NA_real_),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # å³é®ï¼ç¨ if_else ä¿æ POSIXct ç±»åï¼end = last timestamp + 1 step
+    end_dt_interval = dplyr::if_else(
+      is.na(end_dt),
+      as.POSIXct(NA, tz = "UTC"),
+      end_dt + lubridate::seconds(dt_step)
+    ),
+
+    # ååºç» Excel ççå¯è¯»æ¶é´å­ç¬¦ä¸²
+    start_datetime = dplyr::if_else(
+      is.na(start_dt),
+      NA_character_,
+      format(start_dt, "%Y-%m-%d %H:%M:%S", tz = "UTC")
+    ),
+    end_datetime = dplyr::if_else(
+      is.na(end_dt_interval),
+      NA_character_,
+      format(end_dt_interval, "%Y-%m-%d %H:%M:%S", tz = "UTC")
+    )
+  ) %>%
+  select(station, start_datetime, end_datetime, n_obs, n_total, coverage_pct) %>%
+  arrange(desc(n_obs), station)
+
+
+out_cov <- here("dataset", "outcomes", "from_s2", "nmdb_station_coverage_start_end.csv")
+readr::write_csv(coverage_tbl, out_cov)
+
+out_cov
+print(head(coverage_tbl, 15))
+
+# Optional: "by day" version (a day is observed if ANY timestamp that day is non-missing)
+coverage_by_day <- dat %>%
+  mutate(date = as.Date(datetime, tz = "UTC")) %>%
+  tidyr::pivot_longer(cols = -c(datetime, date), names_to = "station", values_to = "value") %>%
+  group_by(station, date) %>%
+  summarise(any_obs = any(!is.na(value)), .groups = "drop") %>%
+  group_by(station) %>%
+  summarise(
+    start_date = if (all(!any_obs)) NA else min(date[any_obs]),
+    end_date   = if (all(!any_obs)) NA else max(date[any_obs]),
+    n_days_obs = sum(any_obs),
+    n_days_total = n_distinct(date),
+    coverage_pct = ifelse(n_days_total > 0, 100 * n_days_obs / n_days_total, NA_real_),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_days_obs), station)
+
+out_cov_day <- here("dataset", "outcomes", "from_s2", "nmdb_station_coverage_start_end_by_day.csv")
+readr::write_csv(coverage_by_day, out_cov_day)
+
+out_cov_day
+
+```
+
+```{r}
+# --------------------------
+# Task:
+# Make a table with lat/lon for a given list of stations,
+# reading from: dataset/row/nmdb_stations_final.csv
+# Save to: dataset/outcomes/nmdb_selected_stations_latlon.csv
+# --------------------------
+
+packages3 <- c("here", "readr", "dplyr", "stringr")
+to_install3 <- setdiff(packages3, rownames(installed.packages()))
+if (length(to_install3) > 0) install.packages(to_install3)
+
+library(here)
+library(readr)
+library(dplyr)
+library(stringr)
+
+here::i_am("scripts/S2 Merging Datasets.Rmd")
+
+out_dir <- here("dataset", "outcomes",  "from_s2")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 1) your station list (exactly as you provided)
+target_stations <- c(
+  "OULU","JUNG","JUNG1","APTY","THUL","KERG","NEWK","INVK","MXCO","MOSC",
+  "AATB","FSMT","NAIN","ATHN","LMKS","NANM","PWNK","ROME","SOPO","TERA",
+  "SOPB","HRMS","DRBS","MRNY","PSNM","SNAE","TSMB","BKSN","MGDN","KIEL",
+  "PTFM","SANB","KIEL2","DOMC","MCRL","DOMB","IRKT","ESOI","JBGO","IRK3",
+  "NRLK","DJON","IRK2","CALM","ARNM","NEU3","AATA","CHAC","NVBK"
+) %>% toupper()
+
+# 2) read station meta table (nmdb_stations_final.csv)
+meta_path <- here("dataset", "row", "nmdb_stations_final.csv")
+
+stations_meta <- readr::read_csv(meta_path, show_col_types = FALSE, progress = FALSE) %>%
+  rename_with(tolower)
+
+# robust: pick station column (usually "station")
+station_col <- if ("station" %in% names(stations_meta)) "station" else names(stations_meta)[1]
+
+stations_meta <- stations_meta %>%
+  rename(station = all_of(station_col)) %>%
+  mutate(station = toupper(as.character(station))) %>%
+  # ensure lat/lon columns exist
+  mutate(
+    lat = if ("lat" %in% names(.)) lat else NA_real_,
+    lon = if ("lon" %in% names(.)) lon else NA_real_
+  ) %>%
+  mutate(
+    lat = suppressWarnings(as.numeric(lat)),
+    lon = suppressWarnings(as.numeric(lon))
+  )
+
+# 3) check which target stations are missing from meta
+meta_stations <- stations_meta %>% distinct(station) %>% pull(station)
+missing_in_meta <- setdiff(target_stations, meta_stations) %>% sort()
+
+# 4) build the final table (only target stations, with their lat/lon and other optional columns)
+selected_latlon <- stations_meta %>%
+  filter(station %in% target_stations) %>%
+  distinct(station, lat, lon, .keep_all = TRUE) %>%
+  arrange(match(station, target_stations))
+
+# 5) (optional) report stations with missing lat/lon
+missing_latlon <- selected_latlon %>%
+  filter(is.na(lat) | is.na(lon)) %>%
+  pull(station) %>%
+  sort()
+
+# 6) save output
+out_path <- here("dataset", "outcomes", "from_s2", "nmdb_selected_stations_latlon.csv")
+readr::write_csv(selected_latlon %>% select(station, lat, lon), out_path)
+
+out_path
+
+cat("Target station count:", length(target_stations), "\n")
+cat("Found in nmdb_stations_final:", nrow(selected_latlon), "\n")
+
+if (length(missing_in_meta) > 0) {
+  cat("Missing in nmdb_stations_final.csv (station not found):\n")
+  print(missing_in_meta)
+} else {
+  cat("All target stations exist in nmdb_stations_final.csv.\n")
+}
+
+if (length(missing_latlon) > 0) {
+  cat("Stations found but lat/lon is missing:\n")
+  print(missing_latlon)
+} else {
+  cat("All found stations have non-missing lat/lon.\n")
+}
+
+```
+
