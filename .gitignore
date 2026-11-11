@@ -1,0 +1,17 @@
+# Research data and outputs intentionally excluded
+/dataset/
+*.ANS
+.env
+.env.*
+!.env.example
+credentials.json
+service-account*.json
+*.pem
+*.key
+.DS_Store
+.Rhistory
+.RData
+.Rproj.user/
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
