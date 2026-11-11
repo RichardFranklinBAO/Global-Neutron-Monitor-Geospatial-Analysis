@@ -1,0 +1,89 @@
+---
+title: "S4 Merging Weather Data"
+output: html_document
+---
+
+```{r}
+# S4: Merge ERA5 point CSVs (2000â2026) + compute 0â12h and 13â24h (13â23) weighted means per station/day
+# Project-relative paths use R here()
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lubridate)
+  library(here)
+})
+
+here::i_am('scripts/S4 Merging Weather Data.Rmd')
+
+# -------- paths (relative via here) --------
+in_dir  <- here("dataset", "outcomes", "from_s3")
+out_dir <- here("dataset", "outcomes", "from_s4")   # per your request: "go to s4"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# -------- read all yearly files and merge by rows (same columns) --------
+files <- list.files(
+  path = in_dir,
+  pattern = "^era5_points_[0-9]{4}\\.csv$",
+  full.names = TRUE
+)
+
+if (length(files) == 0) {
+  stop("No files found in: ", in_dir, "\nExpected names like: era5_points_2000.csv")
+}
+
+era5_all <- purrr::map_dfr(files, ~ readr::read_csv(.x, show_col_types = FALSE))
+
+# -------- clean/parse datetime --------
+# Your datetime example: "2025/1/1  00:00:00"
+era5_all <- era5_all %>%
+  mutate(
+    datetime = str_squish(datetime),
+    datetime = ymd_hms(datetime, tz = "UTC", quiet = TRUE),
+    date = as.Date(datetime),
+    hour = hour(datetime),
+    period = case_when(
+      !is.na(hour) & hour <= 12 ~ "h00_12",
+      !is.na(hour) & hour >= 13 ~ "h13_23",  # "13â24" mapped to 13â23 (hour 24 does not exist)
+      TRUE ~ NA_character_
+    )
+  )
+
+# -------- weighted mean helper (default weights = 1 for non-missing values) --------
+wmean_na <- function(x, w = NULL) {
+  if (is.null(w)) w <- rep(1, length(x))
+  ok <- !is.na(x) & !is.na(w)
+  if (!any(ok)) return(NA_real_)
+  sum(x[ok] * w[ok]) / sum(w[ok])
+}
+
+# Choose numeric variables to aggregate (exclude geometry/id/time/station)
+# Keep only numeric columns, then drop hour helper variables later
+num_cols <- era5_all %>%
+  select(where(is.numeric)) %>%
+  names()
+
+# Often system:index is character; .geo is usually geojson string, so not numeric and will be ignored.
+# If some numeric columns should NOT be averaged, add them to this exclusion list.
+exclude_num <- c("hour")  # helper
+num_cols <- setdiff(num_cols, exclude_num)
+
+# -------- aggregate: per station, per date, per period (two rows per day per station) --------
+era5_s4 <- era5_all %>%
+  filter(!is.na(station), !is.na(date), !is.na(period)) %>%
+  group_by(station, date, period) %>%
+  summarise(
+    across(all_of(num_cols), ~ wmean_na(.x), .names = "{.col}"),
+    n_obs_in_period = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(station, date, period)
+
+# -------- write output --------
+out_file <- file.path(out_dir, "era5_points_merged_weighted_12h_2000_2026.csv")
+readr::write_csv(era5_s4, out_file)
+
+cat("Done.\nInput folder: ", in_dir, "\nFiles read: ", length(files),
+    "\nOutput: ", out_file, "\n", sep = "")
+
+```
+
